@@ -446,7 +446,109 @@ class Forward(object):
     def _cookie_to_forwardid(cookie):
         return cookie & ofproto_v1_3_parser.UINT32_MAX
 
+    def rest_command(func):
+        def _rest_command(*args, **kwargs):
+            key, value = func(*args, **kwargs)
+            switch_id = dpid_lib.dpid_to_str(args[0].dp.id)
+            return {REST_SWITCHID: switch_id,
+                    key: value}
+        return _rest_command
 
+    @rest_command
+    def get_status(self, req, vlan_id, waiters):
+        if self.version == ofproto_v1_0.OFP_VERSION:
+            raise ValueError('get_status operation is not supported')
+
+        msgs = self.ofctl.get_queue_stats(self.dp, waiters)
+        return REST_COMMAND_RESULT, msgs
+
+    @rest_command
+    def get_queue(self, rest, vlan_id):
+        if len(self.queue_list):
+            msg = {'result': 'success',
+                   'details': self.queue_list}
+        else:
+            msg = {'result': 'failure',
+                   'details': 'Queue is not exists.'}
+
+        return REST_COMMAND_RESULT, msg
+
+    @rest_command
+    def set_queue(self, rest, vlan_id):
+        if self.ovs_bridge is None:
+            msg = {'result': 'failure',
+                   'details': 'ovs_bridge is not exists'}
+            return REST_COMMAND_RESULT, msg
+
+        self.queue_list.clear()
+        queue_type = rest.get(REST_QUEUE_TYPE, 'linux-htb')
+        parent_max_rate = rest.get(REST_QUEUE_MAX_RATE, None)
+        queues = rest.get(REST_QUEUES, [])
+        queue_id = 0
+        queue_config = []
+        for queue in queues:
+            max_rate = queue.get(REST_QUEUE_MAX_RATE, None)
+            min_rate = queue.get(REST_QUEUE_MIN_RATE, None)
+            if max_rate is None and min_rate is None:
+                raise ValueError('Required to specify max_rate or min_rate')
+            config = {}
+            if max_rate is not None:
+                config['max-rate'] = max_rate
+            if min_rate is not None:
+                config['min-rate'] = min_rate
+            if len(config):
+                queue_config.append(config)
+            self.queue_list[queue_id] = {'config': config}
+            queue_id += 1
+
+        port_name = rest.get(REST_PORT_NAME, None)
+        vif_ports = self.ovs_bridge.get_port_name_list()
+
+        if port_name is not None:
+            if port_name not in vif_ports:
+                raise ValueError('%s port is not exists' % port_name)
+            vif_ports = [port_name]
+
+        for port_name in vif_ports:
+            try:
+                self.ovs_bridge.set_qos(port_name, type=queue_type,
+                                        max_rate=parent_max_rate,
+                                        queues=queue_config)
+            except Exception as msg:
+                raise ValueError(msg)
+
+        msg = {'result': 'success',
+               'details': self.queue_list}
+
+        return REST_COMMAND_RESULT, msg
+
+    def _delete_queue(self):
+        if self.ovs_bridge is None:
+            return False
+
+        vif_ports = self.ovs_bridge.get_external_ports()
+        for port in vif_ports:
+            self.ovs_bridge.del_qos(port.port_name)
+        return True
+
+    @rest_command
+    def delete_queue(self, rest, vlan_id):
+        self.queue_list.clear()
+        if self._delete_queue():
+            msg = 'success'
+        else:
+            msg = 'failure'
+
+        return REST_COMMAND_RESULT, msg
+
+    @rest_command
+    def set_rule(self, rest, vlan_id, waiters):
+        msgs = []
+        cookie_list = self._get_cookie(vlan_id)
+        for cookie, vid in cookie_list:
+            msg = self._set_rule(cookie, rest, waiters, vid)
+            msgs.append(msg)
+    return REST_COMMAND_RESULT, msgs
 
 
     def _set_rule(self, cookie, rest, waiters, vlan_id):
