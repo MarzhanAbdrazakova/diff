@@ -373,7 +373,7 @@ class Forward(object):
         self.vlan_list[VLANID_NONE] = 0  # for VLAN=None
         self.dp = dp
         self.version = dp.ofproto.OFP_VERSION
-        self.queue_list = {}
+        self.forward_list = {}
         self.CONF = CONF
         self.ovsdb_addr = None
         self.ovs_bridge = None
@@ -455,74 +455,17 @@ class Forward(object):
         return _rest_command
 
     @rest_command
-    def get_status(self, req, vlan_id, waiters):
-        if self.version == ofproto_v1_0.OFP_VERSION:
-            raise ValueError('get_status operation is not supported')
-
-        msgs = self.ofctl.get_queue_stats(self.dp, waiters)
-        return REST_COMMAND_RESULT, msgs
-
-    @rest_command
-    def get_queue(self, rest, vlan_id):
-        if len(self.queue_list):
+    def get_rules(self, rest, vlan_id):
+        if len(self.forward_list):
             msg = {'result': 'success',
-                   'details': self.queue_list}
+                   'details': self.forward_list}
         else:
             msg = {'result': 'failure',
-                   'details': 'Queue is not exists.'}
+                   'details': 'Forward rule is not exists.'}
 
         return REST_COMMAND_RESULT, msg
 
-    @rest_command
-    def set_queue(self, rest, vlan_id):
-        if self.ovs_bridge is None:
-            msg = {'result': 'failure',
-                   'details': 'ovs_bridge is not exists'}
-            return REST_COMMAND_RESULT, msg
-
-        self.queue_list.clear()
-        queue_type = rest.get(REST_QUEUE_TYPE, 'linux-htb')
-        parent_max_rate = rest.get(REST_QUEUE_MAX_RATE, None)
-        queues = rest.get(REST_QUEUES, [])
-        queue_id = 0
-        queue_config = []
-        for queue in queues:
-            max_rate = queue.get(REST_QUEUE_MAX_RATE, None)
-            min_rate = queue.get(REST_QUEUE_MIN_RATE, None)
-            if max_rate is None and min_rate is None:
-                raise ValueError('Required to specify max_rate or min_rate')
-            config = {}
-            if max_rate is not None:
-                config['max-rate'] = max_rate
-            if min_rate is not None:
-                config['min-rate'] = min_rate
-            if len(config):
-                queue_config.append(config)
-            self.queue_list[queue_id] = {'config': config}
-            queue_id += 1
-
-        port_name = rest.get(REST_PORT_NAME, None)
-        vif_ports = self.ovs_bridge.get_port_name_list()
-
-        if port_name is not None:
-            if port_name not in vif_ports:
-                raise ValueError('%s port is not exists' % port_name)
-            vif_ports = [port_name]
-
-        for port_name in vif_ports:
-            try:
-                self.ovs_bridge.set_qos(port_name, type=queue_type,
-                                        max_rate=parent_max_rate,
-                                        queues=queue_config)
-            except Exception as msg:
-                raise ValueError(msg)
-
-        msg = {'result': 'success',
-               'details': self.queue_list}
-
-        return REST_COMMAND_RESULT, msg
-
-    def _delete_queue(self):
+    def _delete_rule(self):
         if self.ovs_bridge is None:
             return False
 
@@ -532,9 +475,9 @@ class Forward(object):
         return True
 
     @rest_command
-    def delete_queue(self, rest, vlan_id):
-        self.queue_list.clear()
-        if self._delete_queue():
+    def delete_rule(self, rest, vlan_id):
+        self.forward_list.clear()
+        if self._delete_rule():
             msg = 'success'
         else:
             msg = 'failure'
@@ -601,4 +544,232 @@ class Forward(object):
         return msg
         
 
+
+
+def _to_of_flow(self, cookie, priority, match, actions):
+        flow = {'cookie': cookie,
+                'priority': priority,
+                'flags': 0,
+                'idle_timeout': 0,
+                'hard_timeout': 0,
+                'match': match,
+                'actions': actions}
+        return flow
+
+    def _to_rest_rule(self, flow):
+        ruleid = QoS._cookie_to_qosid(flow[REST_COOKIE])
+        rule = {REST_QOS_ID: ruleid}
+        rule.update({REST_PRIORITY: flow[REST_PRIORITY]})
+        rule.update(Match.to_rest(flow))
+        rule.update(Action.to_rest(flow))
+        return rule
+
+
+class Match(object):
+
+    _CONVERT = {REST_DL_TYPE:
+                {REST_DL_TYPE_ARP: ether.ETH_TYPE_ARP,
+                 REST_DL_TYPE_IPV4: ether.ETH_TYPE_IP,
+                 REST_DL_TYPE_IPV6: ether.ETH_TYPE_IPV6},
+                REST_NW_PROTO:
+                {REST_NW_PROTO_TCP: inet.IPPROTO_TCP,
+                 REST_NW_PROTO_UDP: inet.IPPROTO_UDP,
+                 REST_NW_PROTO_ICMP: inet.IPPROTO_ICMP,
+                 REST_NW_PROTO_ICMPV6: inet.IPPROTO_ICMPV6}}
+
+    @staticmethod
+    def to_openflow(rest):
+
+        def __inv_combi(msg):
+            raise ValueError('Invalid combination: [%s]' % msg)
+
+        def __inv_2and1(*args):
+            __inv_combi('%s=%s and %s' % (args[0], args[1], args[2]))
+
+        def __inv_2and2(*args):
+            __inv_combi('%s=%s and %s=%s' % (
+                args[0], args[1], args[2], args[3]))
+
+        def __inv_1and1(*args):
+            __inv_combi('%s and %s' % (args[0], args[1]))
+
+        def __inv_1and2(*args):
+            __inv_combi('%s and %s=%s' % (args[0], args[1], args[2]))
+
+        match = {}
+
+        # error check
+        dl_type = rest.get(REST_DL_TYPE)
+        nw_proto = rest.get(REST_NW_PROTO)
+        if dl_type is not None:
+            if dl_type == REST_DL_TYPE_ARP:
+                if REST_SRC_IPV6 in rest:
+                    __inv_2and1(
+                        REST_DL_TYPE, REST_DL_TYPE_ARP, REST_SRC_IPV6)
+                if REST_DST_IPV6 in rest:
+                    __inv_2and1(
+                        REST_DL_TYPE, REST_DL_TYPE_ARP, REST_DST_IPV6)
+                if REST_DSCP in rest:
+                    __inv_2and1(
+                        REST_DL_TYPE, REST_DL_TYPE_ARP, REST_DSCP)
+                if nw_proto:
+                    __inv_2and1(
+                        REST_DL_TYPE, REST_DL_TYPE_ARP, REST_NW_PROTO)
+            elif dl_type == REST_DL_TYPE_IPV4:
+                if REST_SRC_IPV6 in rest:
+                    __inv_2and1(
+                        REST_DL_TYPE, REST_DL_TYPE_IPV4, REST_SRC_IPV6)
+                if REST_DST_IPV6 in rest:
+                    __inv_2and1(
+                        REST_DL_TYPE, REST_DL_TYPE_IPV4, REST_DST_IPV6)
+                if nw_proto == REST_NW_PROTO_ICMPV6:
+                    __inv_2and2(
+                        REST_DL_TYPE, REST_DL_TYPE_IPV4,
+                        REST_NW_PROTO, REST_NW_PROTO_ICMPV6)
+            elif dl_type == REST_DL_TYPE_IPV6:
+                if REST_SRC_IP in rest:
+                    __inv_2and1(
+                        REST_DL_TYPE, REST_DL_TYPE_IPV6, REST_SRC_IP)
+                if REST_DST_IP in rest:
+                    __inv_2and1(
+                        REST_DL_TYPE, REST_DL_TYPE_IPV6, REST_DST_IP)
+                if nw_proto == REST_NW_PROTO_ICMP:
+                    __inv_2and2(
+                        REST_DL_TYPE, REST_DL_TYPE_IPV6,
+                        REST_NW_PROTO, REST_NW_PROTO_ICMP)
+            else:
+                raise ValueError('Unknown dl_type : %s' % dl_type)
+        else:
+            if REST_SRC_IP in rest:
+                if REST_SRC_IPV6 in rest:
+                    __inv_1and1(REST_SRC_IP, REST_SRC_IPV6)
+                if REST_DST_IPV6 in rest:
+                    __inv_1and1(REST_SRC_IP, REST_DST_IPV6)
+                if nw_proto == REST_NW_PROTO_ICMPV6:
+                    __inv_1and2(
+                        REST_SRC_IP, REST_NW_PROTO, REST_NW_PROTO_ICMPV6)
+                rest[REST_DL_TYPE] = REST_DL_TYPE_IPV4
+            elif REST_DST_IP in rest:
+                if REST_SRC_IPV6 in rest:
+                    __inv_1and1(REST_DST_IP, REST_SRC_IPV6)
+                if REST_DST_IPV6 in rest:
+                    __inv_1and1(REST_DST_IP, REST_DST_IPV6)
+                if nw_proto == REST_NW_PROTO_ICMPV6:
+                    __inv_1and2(
+                        REST_DST_IP, REST_NW_PROTO, REST_NW_PROTO_ICMPV6)
+                rest[REST_DL_TYPE] = REST_DL_TYPE_IPV4
+            elif REST_SRC_IPV6 in rest:
+                if nw_proto == REST_NW_PROTO_ICMP:
+                    __inv_1and2(
+                        REST_SRC_IPV6, REST_NW_PROTO, REST_NW_PROTO_ICMP)
+                rest[REST_DL_TYPE] = REST_DL_TYPE_IPV6
+            elif REST_DST_IPV6 in rest:
+                if nw_proto == REST_NW_PROTO_ICMP:
+                    __inv_1and2(
+                        REST_DST_IPV6, REST_NW_PROTO, REST_NW_PROTO_ICMP)
+                rest[REST_DL_TYPE] = REST_DL_TYPE_IPV6
+            elif REST_DSCP in rest:
+                # Apply dl_type ipv4, if doesn't specify dl_type
+                rest[REST_DL_TYPE] = REST_DL_TYPE_IPV4
+            else:
+                if nw_proto == REST_NW_PROTO_ICMP:
+                    rest[REST_DL_TYPE] = REST_DL_TYPE_IPV4
+                elif nw_proto == REST_NW_PROTO_ICMPV6:
+                    rest[REST_DL_TYPE] = REST_DL_TYPE_IPV6
+                elif nw_proto == REST_NW_PROTO_TCP or \
+                        nw_proto == REST_NW_PROTO_UDP:
+                    raise ValueError('no dl_type was specified')
+                else:
+                    raise ValueError('Unknown nw_proto: %s' % nw_proto)
+
+        for key, value in rest.items():
+            if key in Match._CONVERT:
+                if value in Match._CONVERT[key]:
+                    match.setdefault(key, Match._CONVERT[key][value])
+                else:
+                    raise ValueError('Invalid rule parameter. : key=%s' % key)
+            else:
+                match.setdefault(key, value)
+
+        return match
+
+    @staticmethod
+    def to_rest(openflow):
+        of_match = openflow[REST_MATCH]
+
+        mac_dontcare = mac.haddr_to_str(mac.DONTCARE)
+        ip_dontcare = '0.0.0.0'
+        ipv6_dontcare = '::'
+
+        match = {}
+        for key, value in of_match.items():
+            if key == REST_SRC_MAC or key == REST_DST_MAC:
+                if value == mac_dontcare:
+                    continue
+            elif key == REST_SRC_IP or key == REST_DST_IP:
+                if value == ip_dontcare:
+                    continue
+            elif key == REST_SRC_IPV6 or key == REST_DST_IPV6:
+                if value == ipv6_dontcare:
+                    continue
+            elif value == 0:
+                continue
+
+            if key in Match._CONVERT:
+                conv = Match._CONVERT[key]
+                conv = dict((value, key) for key, value in conv.items())
+                match.setdefault(key, conv[value])
+            else:
+                match.setdefault(key, value)
+
+        return match
+
+    @staticmethod
+    def to_mod_openflow(of_match):
+        mac_dontcare = mac.haddr_to_str(mac.DONTCARE)
+        ip_dontcare = '0.0.0.0'
+        ipv6_dontcare = '::'
+
+        match = {}
+        for key, value in of_match.items():
+            if key == REST_SRC_MAC or key == REST_DST_MAC:
+                if value == mac_dontcare:
+                    continue
+            elif key == REST_SRC_IP or key == REST_DST_IP:
+                if value == ip_dontcare:
+                    continue
+            elif key == REST_SRC_IPV6 or key == REST_DST_IPV6:
+                if value == ipv6_dontcare:
+                    continue
+            elif value == 0:
+                continue
+
+            match.setdefault(key, value)
+
+    
+        return match
+     
+class Action(object):
+
+    @staticmethod
+    def to_rest(flow):
+        if REST_ACTION in flow:
+            actions = []
+            for act in flow[REST_ACTION]:
+                field_value = re.search('SET_FIELD: \{tcp_dst:(\d+)', act)
+                output_value = re.search('OUTPUT:(\d+)', act)
+                if field_value:
+                    actions.append({REST_ACTION_MARK: field_value.group(1)})
+                    actions.append({REST_ACTION_OUTPUT: 
+                meter_value = re.search('METER:(\d+)', act)
+                if meter_value:
+                    actions.append({REST_ACTION_METER: meter_value.group(1)})
+                queue_value = re.search('SET_QUEUE:(\d+)', act)
+                if queue_value:
+                    actions.append({REST_ACTION_QUEUE: queue_value.group(1)})
+            action = {REST_ACTION: actions}
+        else:
+            action = {REST_ACTION: 'Unknown action type.'}
+
+        return action
 
