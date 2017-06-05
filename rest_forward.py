@@ -3,7 +3,7 @@ import logging
 import json
 import re
 
-from ryu.app import conf_switch_key as cs_key
+from ryu.app import conf_switch_key as cs_key 
 from ryu.app.wsgi import ControllerBase
 from ryu.app.wsgi import Response
 from ryu.app.wsgi import route
@@ -755,6 +755,25 @@ class Action(object):
     def to_rest(flow):
         if REST_ACTION in flow:
             actions = []
+            str_flow1 = json.dumps(flow[REST_ACTION][0])
+            str_flow2 = json.dumps(flow[REST_ACTION][1])
+            tcp_dst_value1=re.search('"tcp_dst", "value": (\d+)', str_flow1)
+            tcp_dst_value2=re.search('"tcp_dst", "type": "SET_FIELD", "value": (\d+)', str_flow1)
+            tcp_src_value1=re.search('"tcp_src", "value": (\d+)', str_flow1)
+            tcp_src_value2=re.search('"tcp_src", "type": "SET_FIELD", "value": (\d+)', str_flow1)
+            output_value=re.search('"OUTPUT": (\d+)', str_flow2)
+            if tcp_dst_value1 :
+                actions.append({ REST_ACTION_TCP_DST: tcp_dst_value1.group(1)}) 
+            elif tcp_dst_value2:
+                actions.append({ REST_ACTION_TCP_DST: tcp_dst_value2.group(1)})
+            if tcp_src_value1:
+                actions.append({ REST_ACTION_TCP_SRC: tcp_src_value1.group(1)})
+            elif tcp_src_value2:
+                actions.append({ REST_ACTION_TCP_SRC: tcp_src_value2.group(1)})
+            if output_value:
+                actions.append({ REST_OUTPUT: output_value.group(1)})
+                
+                
             for act in flow[REST_ACTION]:
                 field_value = re.search('SET_FIELD: \{tcp_dst:(\d+)', act)
                 output_value = re.search('OUTPUT:(\d+)', act)
