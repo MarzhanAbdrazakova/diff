@@ -535,7 +535,7 @@ class Forward(object):
         except:
             raise ValueError('Invalid rule parameter.')
 
-        qos_id = QoS._cookie_to_qosid(cookie)
+        forward_id = Forward._cookie_to_forwardid(cookie)
         msg = {'result': 'success',
                'details': 'Port forwarding added. : forward_id=%d' % forward_id}
 
@@ -546,7 +546,7 @@ class Forward(object):
 
 
 
-def _to_of_flow(self, cookie, priority, match, actions):
+    def _to_of_flow(self, cookie, priority, match, actions):
         flow = {'cookie': cookie,
                 'priority': priority,
                 'flags': 0,
@@ -557,8 +557,8 @@ def _to_of_flow(self, cookie, priority, match, actions):
         return flow
 
     def _to_rest_rule(self, flow):
-        ruleid = QoS._cookie_to_qosid(flow[REST_COOKIE])
-        rule = {REST_QOS_ID: ruleid}
+        ruleid = Forward._cookie_to_forwardid(flow[REST_COOKIE])
+        rule = {REST_Forward_ID: ruleid}
         rule.update({REST_PRIORITY: flow[REST_PRIORITY]})
         rule.update(Match.to_rest(flow))
         rule.update(Action.to_rest(flow))
@@ -773,19 +773,6 @@ class Action(object):
             if output_value:
                 actions.append({ REST_OUTPUT: output_value.group(1)})
                 
-                
-            for act in flow[REST_ACTION]:
-                field_value = re.search('SET_FIELD: \{tcp_dst:(\d+)', act)
-                output_value = re.search('OUTPUT:(\d+)', act)
-                if field_value:
-                    actions.append({REST_ACTION_MARK: field_value.group(1)})
-                    actions.append({REST_ACTION_OUTPUT: 
-                meter_value = re.search('METER:(\d+)', act)
-                if meter_value:
-                    actions.append({REST_ACTION_METER: meter_value.group(1)})
-                queue_value = re.search('SET_QUEUE:(\d+)', act)
-                if queue_value:
-                    actions.append({REST_ACTION_QUEUE: queue_value.group(1)})
             action = {REST_ACTION: actions}
         else:
             action = {REST_ACTION: 'Unknown action type.'}
